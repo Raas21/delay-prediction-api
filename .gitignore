@@ -11,7 +11,7 @@ target/
 .factorypath
 .project
 .settings
-.springBeans
+.springBeansg
 .sts4-cache
 
 ### IntelliJ IDEA ###
@@ -33,3 +33,5 @@ build/
 ### VS Code ###
 .vscode/
 
+
+data/
