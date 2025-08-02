@@ -9,12 +9,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.File;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 
+/**
+ * Service for ingesting GTFS static data into the PostgreSQL database.
+ * Each entity type (agency, route, stop, etc.) is processed in a separate transaction
+ * to ensure partial data is saved even if one section fails.
+ */
 @Service
 public class GtfsStaticIngestionService {
     private static final Logger logger = LoggerFactory.getLogger(GtfsStaticIngestionService.class);
@@ -36,20 +42,48 @@ public class GtfsStaticIngestionService {
     @Autowired
     private TripRepository tripRepository;
 
+    /**
+     * Ingests GTFS static data from the specified folder path.
+     * @param gtfsFolderPath Path to the GTFS directory containing files like agency.txt, routes.txt, etc.
+     * @throws Exception If the directory is invalid or GTFS reading fails.
+     */
     public void ingestGtfsStaticData(String gtfsFolderPath) throws Exception {
+        logger.info("Starting ingestion for folder: {}", gtfsFolderPath);
         File gtfsDir = new File(gtfsFolderPath);
         if (!gtfsDir.exists() || !gtfsDir.isDirectory()) {
+            logger.error("Invalid GTFS directory: {}", gtfsFolderPath);
             throw new IllegalArgumentException("Invalid GTFS directory: " + gtfsFolderPath);
         }
 
         GtfsReader reader = new GtfsReader();
         reader.setEntityStore(new GtfsRelationalDaoImpl());
         reader.setInputLocation(gtfsDir);
-        reader.run();
+        logger.info("Reading GTFS files from: {}", gtfsFolderPath);
+        try {
+            reader.run();
+        } catch (Exception e) {
+            logger.error("Failed to read GTFS files: {}", e.getMessage(), e);
+            throw e;
+        }
 
         GtfsRelationalDaoImpl dao = (GtfsRelationalDaoImpl) reader.getEntityStore();
+        logger.info("GTFS data loaded. Agencies: {}, Routes: {}, Stops: {}, Calendars: {}, CalendarDates: {}, Shapes: {}, Trips: {}, StopTimes: {}",
+                dao.getAllAgencies().size(), dao.getAllRoutes().size(), dao.getAllStops().size(),
+                dao.getAllCalendars().size(), dao.getAllCalendarDates().size(), dao.getAllShapePoints().size(),
+                dao.getAllTrips().size(), dao.getAllStopTimes().size());
 
-        // Ingest agencies
+        ingestAgencies(dao);
+        ingestRoutes(dao);
+        ingestStops(dao);
+        ingestCalendars(dao);
+        ingestCalendarDates(dao);
+        ingestShapes(dao);
+        ingestTrips(dao);
+        ingestStopTimes(dao);
+    }
+
+    @Transactional
+    private void ingestAgencies(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.Agency gtfsAgency : dao.getAllAgencies()) {
             com.transit.delay_prediction.entity.Agency entity = new com.transit.delay_prediction.entity.Agency();
             entity.setAgencyId(gtfsAgency.getId());
@@ -61,8 +95,10 @@ public class GtfsStaticIngestionService {
             agencyRepository.save(entity);
             logger.info("Saved agency: {}", gtfsAgency.getId());
         }
+    }
 
-        // Ingest routes
+    @Transactional
+    private void ingestRoutes(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.Route gtfsRoute : dao.getAllRoutes()) {
             com.transit.delay_prediction.entity.Route entity = new com.transit.delay_prediction.entity.Route();
             entity.setRouteId(gtfsRoute.getId().getId());
@@ -76,8 +112,10 @@ public class GtfsStaticIngestionService {
             routeRepository.save(entity);
             logger.info("Saved route: {}", gtfsRoute.getId().getId());
         }
+    }
 
-        // Ingest stops
+    @Transactional
+    private void ingestStops(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.Stop gtfsStop : dao.getAllStops()) {
             com.transit.delay_prediction.entity.Stop entity = new com.transit.delay_prediction.entity.Stop();
             entity.setStopId(gtfsStop.getId().getId());
@@ -88,12 +126,16 @@ public class GtfsStaticIngestionService {
             entity.setZoneId(gtfsStop.getZoneId());
             entity.setStopUrl(gtfsStop.getUrl());
             entity.setLocationType(gtfsStop.getLocationType());
-            entity.setParentStation(gtfsStop.getParentStation() != null ? gtfsStop.getParentStation() : null);
+            String parentStation = gtfsStop.getParentStation();
+            entity.setParentStation(parentStation);
+            logger.info("Processing stop: {}, parentStation: {}", gtfsStop.getId().getId(), parentStation);
             stopRepository.save(entity);
             logger.info("Saved stop: {}", gtfsStop.getId().getId());
         }
+    }
 
-        // Ingest calendars
+    @Transactional
+    private void ingestCalendars(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.ServiceCalendar gtfsCalendar : dao.getAllCalendars()) {
             com.transit.delay_prediction.entity.Calendar entity = new com.transit.delay_prediction.entity.Calendar();
             entity.setServiceId(gtfsCalendar.getServiceId().getId());
@@ -104,16 +146,20 @@ public class GtfsStaticIngestionService {
             entity.setFriday(gtfsCalendar.getFriday() == 1);
             entity.setSaturday(gtfsCalendar.getSaturday() == 1);
             entity.setSunday(gtfsCalendar.getSunday() == 1);
-            entity.setStartDate(LocalDate.parse(gtfsCalendar.getStartDate().toString(), DateTimeFormatter.BASIC_ISO_DATE));
-            entity.setEndDate(LocalDate.parse(gtfsCalendar.getEndDate().toString(), DateTimeFormatter.BASIC_ISO_DATE));
+            String startDateString = gtfsCalendar.getStartDate().getYear() + String.format("%02d", gtfsCalendar.getStartDate().getMonth()) + String.format("%02d", gtfsCalendar.getStartDate().getDay());
+            String endDateString = gtfsCalendar.getEndDate().getYear() + String.format("%02d", gtfsCalendar.getEndDate().getMonth()) + String.format("%02d", gtfsCalendar.getEndDate().getDay());
+            entity.setStartDate(LocalDate.parse(startDateString, DateTimeFormatter.BASIC_ISO_DATE));
+            entity.setEndDate(LocalDate.parse(endDateString, DateTimeFormatter.BASIC_ISO_DATE));
             calendarRepository.save(entity);
             logger.info("Saved calendar: {}", gtfsCalendar.getServiceId().getId());
         }
+    }
 
-        // Ingest calendar dates
+    @Transactional
+    private void ingestCalendarDates(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.ServiceCalendarDate gtfsCalendarDate : dao.getAllCalendarDates()) {
             com.transit.delay_prediction.entity.CalendarDate entity = new com.transit.delay_prediction.entity.CalendarDate();
-            String dateString = gtfsCalendarDate.getDate().toString();
+            String dateString = gtfsCalendarDate.getDate().getYear() + String.format("%02d", gtfsCalendarDate.getDate().getMonth()) + String.format("%02d", gtfsCalendarDate.getDate().getDay());
             entity.setId(gtfsCalendarDate.getServiceId().getId() + "_" + dateString);
             entity.setServiceId(gtfsCalendarDate.getServiceId().getId());
             entity.setDate(LocalDate.parse(dateString, DateTimeFormatter.BASIC_ISO_DATE));
@@ -121,8 +167,10 @@ public class GtfsStaticIngestionService {
             calendarDateRepository.save(entity);
             logger.info("Saved calendar date: {}", entity.getId());
         }
+    }
 
-        // Ingest shapes
+    @Transactional
+    private void ingestShapes(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.ShapePoint gtfsShape : dao.getAllShapePoints()) {
             com.transit.delay_prediction.entity.Shape entity = new com.transit.delay_prediction.entity.Shape();
             entity.setId(gtfsShape.getShapeId().getId() + "_" + gtfsShape.getSequence());
@@ -133,22 +181,31 @@ public class GtfsStaticIngestionService {
             shapeRepository.save(entity);
             logger.info("Saved shape: {}", entity.getId());
         }
+    }
 
-        // Ingest trips
+    @Transactional
+    private void ingestTrips(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.Trip gtfsTrip : dao.getAllTrips()) {
             com.transit.delay_prediction.entity.Trip entity = new com.transit.delay_prediction.entity.Trip();
             entity.setTripId(gtfsTrip.getId().getId());
             entity.setRoute(routeRepository.findById(gtfsTrip.getRoute().getId().getId()).orElse(null));
             entity.setServiceId(gtfsTrip.getServiceId().getId());
             entity.setTripHeadsign(gtfsTrip.getTripHeadsign());
-            entity.setDirectionId(Integer.parseInt(gtfsTrip.getDirectionId()));
+            try {
+                entity.setDirectionId(Integer.parseInt(gtfsTrip.getDirectionId()));
+            } catch (NumberFormatException e) {
+                entity.setDirectionId(0); // Default to 0 if direction_id is invalid
+                logger.warn("Invalid direction_id for trip {}: {}", gtfsTrip.getId().getId(), gtfsTrip.getDirectionId());
+            }
             entity.setBlockId(gtfsTrip.getBlockId());
             entity.setShapeId(gtfsTrip.getShapeId() != null ? gtfsTrip.getShapeId().getId() : null);
             tripRepository.save(entity);
             logger.info("Saved trip: {}", gtfsTrip.getId().getId());
         }
+    }
 
-        // Ingest stop times
+    @Transactional
+    private void ingestStopTimes(GtfsRelationalDaoImpl dao) {
         for (org.onebusaway.gtfs.model.StopTime gtfsStopTime : dao.getAllStopTimes()) {
             com.transit.delay_prediction.entity.StopTime entity = new com.transit.delay_prediction.entity.StopTime();
             entity.setId(gtfsStopTime.getTrip().getId().getId() + "_" + gtfsStopTime.getStopSequence());
@@ -170,6 +227,11 @@ public class GtfsStaticIngestionService {
         int hours = seconds / 3600;
         int minutes = (seconds % 3600) / 60;
         int secs = seconds % 60;
-        return LocalTime.of(hours, minutes, secs);
+        try {
+            return LocalTime.of(hours, minutes, secs);
+        } catch (Exception e) {
+            logger.warn("Invalid time format for seconds: {}", seconds);
+            return null;
+        }
     }
 }
