@@ -28,7 +28,9 @@ public class GtfsDataInitializer {
             logger.info("Starting GTFS data initialization");
             String basePath = Paths.get("data", "gtfs_static").toAbsolutePath().toString();
             logger.info("Base GTFS path: {}", basePath);
-            String[] boroughs = {"gtfs_b", "gtfs_busco", "gtfs_si", "gtfs_q", "gtfs_m", "gtfs_bx"};
+            //String[] boroughs = {"gtfs_b","gtfs_busco","gtfs_bx", "gtfs_m", "gtfs_q", "gtfs_s"};
+            //Limiting to one borough as ingestion is taking too long.
+            String[] boroughs = {"gtfs_b"};
             for (String borough : boroughs) {
                 String path = Paths.get(basePath, borough).toString();
                 File gtfsDir = new File(path);
