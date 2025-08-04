@@ -37,3 +37,7 @@ build/
 data/
 
 /ml-service/src/models/model.pkl
+
+/ml-service/.env
+
+*.log
