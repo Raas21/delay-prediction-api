@@ -5,11 +5,13 @@ import com.transit.delay_prediction.entity.VehiclePosition;
 import com.transit.delay_prediction.repository.StopRepository;
 import com.transit.delay_prediction.repository.StopTimeRepository;
 import com.transit.delay_prediction.repository.TripRepository;
+import com.transit.delay_prediction.repository.VehiclePositionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
@@ -22,7 +24,7 @@ import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 
 /**
- * Service for ingesting GTFS-RT data from MTA BusTime API and storing in Redis.
+ * Service for ingesting GTFS-RT data from MTA BusTime API and storing in Redis, PostgreSQL, and Kafka.
  * Fetches vehicle positions every 30 seconds and processes data for Brooklyn routes.
  */
 @Service
@@ -44,11 +46,19 @@ public class GtfsRtIngestionService {
     @Autowired
     private StopTimeRepository stopTimeRepository;
 
+    @Autowired
+    private VehiclePositionRepository vehiclePositionRepository;
+
+    @Autowired
+    private KafkaTemplate<String, VehiclePosition> kafkaTemplate;
+
     @Value("${mta.bustime.api.key}")
     private String apiKey;
 
     @Value("${mta.bustime.api.url:http://gtfsrt.prod.obanyc.com/vehiclePositions}")
     private String apiUrl;
+
+    private static final String TOPIC = "vehicle_positions";
 
     /**
      * Starts periodic GTFS-RT ingestion after service initialization.
@@ -66,7 +76,7 @@ public class GtfsRtIngestionService {
 
     /**
      * Fetches GTFS-RT data from MTA BusTime API and processes vehicle positions.
-     * @return Flux of VehiclePosition entities stored in Redis.
+     * @return Flux of VehiclePosition entities stored in Redis, PostgreSQL, and Kafka.
      */
     private Flux<VehiclePosition> fetchGtfsRtData() {
         return webClientBuilder.build()
@@ -77,7 +87,7 @@ public class GtfsRtIngestionService {
             .doOnSuccess(feed -> logger.info("Received GTFS-RT feed with {} entities", feed.getEntityCount()))
             .doOnError(error -> logger.error("Failed to fetch GTFS-RT feed: {}", error.getMessage(), error))
             .flatMapMany(this::processFeedMessage)
-            .flatMap(this::storeInRedis);
+            .flatMap(this::storeInRedisPostgresAndKafka);
     }
 
     /**
@@ -122,8 +132,12 @@ public class GtfsRtIngestionService {
                                 long delaySeconds = ChronoUnit.SECONDS.between(
                                     scheduled, position.getTimestamp());
                                 position.setDelay((int) delaySeconds);
+                                logger.debug("Calculated delay for vehicleId={}: {} seconds", 
+                                    vehicle.getVehicle().getId(), delaySeconds);
                             } else {
                                 position.setDelay(0);
+                                logger.debug("No stopTime found for tripId={}, stopId={}, sequence={}", 
+                                    trip.getTripId(), vehicle.getStopId(), vehicle.getCurrentStopSequence());
                             }
                             return Mono.just(position);
                         })
@@ -132,6 +146,8 @@ public class GtfsRtIngestionService {
                             trip.getTripId(), vehicle.getStopId(), vehicle.getCurrentStopSequence(), error.getMessage()));
                 } else {
                     position.setDelay(0);
+                    logger.debug("No stopId or stopSequence for vehicleId={}, setting delay=0", 
+                        vehicle.getVehicle().getId());
                     return Mono.just(position);
                 }
             })
@@ -139,16 +155,18 @@ public class GtfsRtIngestionService {
     }
 
     /**
-     * Stores VehiclePosition in Redis with a 5-minute TTL.
+     * Stores VehiclePosition in Redis with a 5-minute TTL, PostgreSQL, and Kafka.
      * @param position VehiclePosition entity.
      * @return Mono of stored VehiclePosition.
      */
-    private Mono<VehiclePosition> storeInRedis(VehiclePosition position) {
+    private Mono<VehiclePosition> storeInRedisPostgresAndKafka(VehiclePosition position) {
         String key = "vehicle_position:" + position.getVehicleId();
         return redisTemplate.opsForValue()
             .set(key, position, Duration.ofMinutes(5))
+            .then(Mono.fromCallable(() -> vehiclePositionRepository.save(position)))
+            .doOnSuccess(p -> kafkaTemplate.send(TOPIC, position.getVehicleId(), position))
             .thenReturn(position)
-            .doOnSuccess(p -> logger.debug("Stored in Redis: {}", key))
-            .doOnError(error -> logger.error("Error storing in Redis for key {}: {}", key, error.getMessage()));
+            .doOnSuccess(p -> logger.info("Stored in Redis, PostgreSQL, and Kafka: key={}", key))
+            .doOnError(error -> logger.error("Error storing in Redis/PostgreSQL/Kafka for key {}: {}", key, error.getMessage()));
     }
 }
