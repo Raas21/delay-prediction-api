@@ -6,6 +6,9 @@ import com.transit.delay_prediction.repository.StopRepository;
 import com.transit.delay_prediction.repository.StopTimeRepository;
 import com.transit.delay_prediction.repository.TripRepository;
 import com.transit.delay_prediction.repository.VehiclePositionRepository;
+
+import io.netty.channel.ChannelOption;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,9 +16,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import reactor.netty.http.client.HttpClient;
+import reactor.netty.resources.ConnectionProvider;
 
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
@@ -31,8 +38,7 @@ import java.time.temporal.ChronoUnit;
 public class GtfsRtIngestionService {
     private static final Logger logger = LoggerFactory.getLogger(GtfsRtIngestionService.class);
 
-    @Autowired
-    private WebClient.Builder webClientBuilder;
+    private final WebClient webClient;
 
     @Autowired
     private ReactiveRedisTemplate<String, VehiclePosition> redisTemplate;
@@ -61,6 +67,32 @@ public class GtfsRtIngestionService {
     private static final String TOPIC = "vehicle_positions";
 
     /**
+     * Constructor to initialize WebClient with increased buffer size and timeout.
+     */
+    public GtfsRtIngestionService() {
+        ConnectionProvider provider = ConnectionProvider.builder("gtfsConnectionProvider")
+                .maxConnections(50)
+                .maxIdleTime(Duration.ofSeconds(20))
+                .maxLifeTime(Duration.ofSeconds(60))
+                .pendingAcquireTimeout(Duration.ofSeconds(10))
+                .build();
+
+        // Create ExchangeStrategies with custom buffer size
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024)) // 16MB
+            .build();
+
+        this.webClient = WebClient.builder()
+                .clientConnector(new ReactorClientHttpConnector(
+                        HttpClient.create(provider)
+                                .responseTimeout(Duration.ofSeconds(10))
+                                .option(ChannelOption.SO_KEEPALIVE, true)))
+                .exchangeStrategies(strategies)  //apply the strategies explicitly
+                .build();
+    }
+
+
+    /**
      * Starts periodic GTFS-RT ingestion after service initialization.
      */
     @PostConstruct
@@ -75,18 +107,26 @@ public class GtfsRtIngestionService {
     }
 
     /**
-     * Fetches GTFS-RT data from MTA BusTime API and processes vehicle positions.
+     * Fetches GTFS-RT data from MTA BusTime API as a stream and processes vehicle positions.
      * @return Flux of VehiclePosition entities stored in Redis, PostgreSQL, and Kafka.
      */
     private Flux<VehiclePosition> fetchGtfsRtData() {
-        return webClientBuilder.build()
+        return webClient
             .get()
             .uri(apiUrl + "?key={key}", apiKey)
             .retrieve()
-            .bodyToMono(FeedMessage.class)
-            .doOnSuccess(feed -> logger.info("Received GTFS-RT feed with {} entities", feed.getEntityCount()))
+            .bodyToMono(byte[].class) // Retrieve the entire response as a single byte array
+            .flatMapMany(bytes -> {
+                try {
+                    FeedMessage feedMessage = FeedMessage.parseFrom(bytes);
+                    logger.info("Received GTFS-RT feed with {} entities", feedMessage.getEntityCount());
+                    return processFeedMessage(feedMessage);
+                } catch (Exception e) {
+                    logger.error("Failed to parse GTFS-RT feed: {}", e.getMessage(), e);
+                    return Flux.error(e);
+                }
+            })
             .doOnError(error -> logger.error("Failed to fetch GTFS-RT feed: {}", error.getMessage(), error))
-            .flatMapMany(this::processFeedMessage)
             .flatMap(this::storeInRedisPostgresAndKafka);
     }
 
