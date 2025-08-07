@@ -5,11 +5,13 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_DATA_DIR: /var/lib/zookeeper/data
+      ZOOKEEPER_LOG_DIR: /var/lib/zookeeper/data
     ports:
       - "2181:2181"
     volumes:
       - zookeeper_data:/var/lib/zookeeper/data
-      - zookeeper_logs:/var/lib/zookeeper/log
     healthcheck:
       test: ["CMD", "sh", "-c", "zookeeper-shell zookeeper:2181 ls / | grep zookeeper"]
       interval: 10s
@@ -83,14 +85,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/postgres
-      - SPRING_DATASOURCE_USERNAME=postgres
-      - SPRING_DATASOURCE_PASSWORD=password
-      - SPRING_REDIS_HOST=redis
-      - SPRING_REDIS_PORT=6379
-      - SPRING_KAFKA_BOOTSTRAP-SERVERS=kafka:9092
-      - MTA_BUSTIME_API_KEY=27ccd65b-c757-462f-8db8-a7c8bd613d3b
-      - MTA_BUSTIME_API_URL=http://gtfsrt.prod.obanyc.com/vehiclePositions
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,6 +94,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      ml-service:
+        condition: service_started
     networks:
       - transit-network
 
@@ -128,7 +126,6 @@ volumes:
   postgres_data:
   redis_data:
   zookeeper_data:
-  zookeeper_logs:
   kafka_data:
 
 networks:
