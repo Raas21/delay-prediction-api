@@ -41,3 +41,5 @@ data/
 /ml-service/.env
 
 *.log
+
+ ml-service/.env-sample
