@@ -37,7 +37,7 @@ build/
 
 data/
 
-/ml-service/models/
+/ml-service/src/models/
 /ml-service/.env
 
 *.log
