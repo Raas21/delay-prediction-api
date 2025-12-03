@@ -3,6 +3,7 @@ target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
+
 /src/main/resources/application.properties
 
 ### STS ###
@@ -36,10 +37,11 @@ build/
 
 data/
 
-/ml-service/src/models/model.pkl
-
+/ml-service/models/
 /ml-service/.env
 
 *.log
 
- ml-service/.env-sample
+__pycache__/
+*.pyc
+.DS_Store
